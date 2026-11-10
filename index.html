@@ -103,6 +103,9 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .chip input:checked + span{border-color:var(--c);background:color-mix(in srgb, var(--c) 15%, var(--surface))}
 .switch{display:flex;align-items:center;justify-content:space-between;gap:10px;font-weight:600}
 .switch input{width:22px;height:22px;accent-color:var(--accent)}
+.sync{font-size:12.5px;font-weight:600;color:var(--muted);margin-top:-8px}
+.sync.ok,.sync.device{color:var(--ok)}
+.sync.local,.sync.err{color:var(--warn)}
 .obj{cursor:pointer}
 .obj-cum{font-family:var(--f-display);font-size:24px}
 .obj-pct{font-family:var(--f-display);font-weight:800;font-size:22px;color:var(--b100)}
@@ -206,6 +209,9 @@ function emptyState(){
 let S;
 try { S = JSON.parse(localStorage.getItem(KEY)); } catch(e) { S = null; }
 if (!S || !S.cfg) S = demoState();
+if (!S.cfg.envV2 && S.cfg.env.map(e=>e.id).join()==="courses,sorties,trajets,imprevus"){ S.cfg.env = JSON.parse('[{"id":"courses","nom":"Courses","pct":35},{"id":"sorties","nom":"Loisirs & shopping","pct":25},{"id":"trajets","nom":"Trajets","pct":25},{"id":"imprevus","nom":"Imprévus","pct":15}]'); S.cfg.envV2 = true; try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} }
+if (!S.cfg.envV3 && S.cfg.env.some(e=>e.id==="perso") && S.cfg.env.some(e=>e.id==="sorties")){ const so = S.cfg.env.find(e=>e.id==="sorties"), pe = S.cfg.env.find(e=>e.id==="perso"); so.nom = "Loisirs & shopping"; so.pct = num(so.pct) + num(pe.pct); S.cfg.env = S.cfg.env.filter(e=>e.id!=="perso"); S.depenses.forEach(x=>{ if (x.cat==="perso") x.cat = "sorties"; }); S.cfg.envV3 = true; try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} }
+if (!S.cfg.envV4 && S.months["2026-11"] && S.months["2026-11"].fixesOverride != null){ const pc = {courses:35, sorties:25, trajets:25, imprevus:15}; S.cfg.env.forEach(e=>{ if (pc[e.id] != null) e.pct = pc[e.id]; }); S.months["2026-11"].envOverride = {courses:40, trajets:40, sorties:10, imprevus:10}; S.cfg.envV4 = true; try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} }
 if (!S.cfg.revenus) S.cfg.revenus = defaultRevenus();
 if (!S.cfg.m2){
   S.cfg.revenus = S.cfg.revenus.filter(r=>r.id!=="13e");
@@ -213,20 +219,33 @@ if (!S.cfg.m2){
   S.cfg.rembTotal = 0; S.cfg.rembParMois = 0; S.cfg.m2 = true;
 }
 for (const k in S.months){ const m = S.months[k]; if (!m.revenus){ m.revenus = [{id:uid(),src:null,nom:"Paie",montant:num(m.salaire),recu:true,edited:true,epargne:false}]; m.manuel = true; m.bonus = 0; } }
-function save(){ try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} }
+let cloudRef = null, cloudT = null, sync = "local";
+function save(){
+  try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){}
+  if (cloudRef){ clearTimeout(cloudT); cloudT = setTimeout(cloudSave, 700); }
+}
+async function cloudSave(){
+  if (!cloudRef) return;
+  try { await cloudRef.set({ state: JSON.stringify(S), savedAt: new Date().toISOString() }); setSync("ok"); }
+  catch(e){ setSync("err"); }
+}
+function syncLabel(){ return {ok:"✓ Sauvegardé sur ton compte", wait:"Connexion à ta sauvegarde…", err:"⚠ Sauvegarde en ligne indisponible", local:"⚠ Non sauvegardé : connecte-toi à Claude", device:"✓ Enregistré sur ce téléphone"}[sync]; }
+function setSync(v){ sync = v; const el = document.getElementById("sync"); if (el){ el.textContent = syncLabel(); el.className = "sync " + v; } }
 
 let tab = "mois", editPaie = false, armed = null;
 
 /* ---------- calculs ---------- */
 function plan(salaire, bonus=0){
   const c = S.cfg;
-  const fixes = c.fixes.reduce((a,f)=>a+num(f.montant),0);
+  const curM = S.months[monthKey(today())];
+  const fixes = curM && curM.fixesOverride != null ? num(curM.fixesOverride) : c.fixes.reduce((a,f)=>a+num(f.montant),0);
   const base = Math.max(0, salaire - bonus);
-  const epargne = (c.mode==="fixe" ? Math.min(num(c.epargneFixe), base) : Math.round(base * c.epargnePct / 100)) + bonus;
+  const epargne = (curM && curM.epOverride != null ? num(curM.epOverride) : (c.mode==="fixe" ? Math.min(num(c.epargneFixe), base) : Math.round(base * c.epargnePct / 100))) + bonus;
   const prov = provisions(), provTotal = prov.reduce((a,x)=>a+x.montant,0);
   const vivre = salaire - fixes - epargne - provTotal;
-  const totPct = c.env.reduce((a,e)=>a+num(e.pct),0) || 1;
-  const env = c.env.map((e,i)=>({ ...e, color: COLORS[i % COLORS.length], alloue: Math.max(0,vivre) * num(e.pct) / totPct }));
+  const pctOf = e => curM && curM.envOverride && curM.envOverride[e.id] != null ? num(curM.envOverride[e.id]) : num(e.pct);
+  const totPct = c.env.reduce((a,e)=>a+pctOf(e),0) || 1;
+  const env = c.env.map((e,i)=>({ ...e, pct: pctOf(e), color: COLORS[i % COLORS.length], alloue: Math.max(0,vivre) * pctOf(e) / totPct }));
   const mk = monthKey(today()), cur = S.months[mk];
   const dejaCeMois = cur && cur.vire ? num(cur.remb) : 0;
   const remb = Math.max(0, Math.min(num(c.rembParMois), restantRemb() + dejaCeMois, epargne));
@@ -265,13 +284,13 @@ function cumulEpargne(){
   for (const k in S.months){ const m = S.months[k]; if (m.vire) t += m.montant ?? Math.round(num(m.salaire) * (m.pct ?? S.cfg.epargnePct) / 100); }
   return t;
 }
-function colorOf(cat){ if (String(cat).startsWith("proj-")) return "var(--muted)"; const i = S.cfg.env.findIndex(e=>e.id===cat); return i<0 ? "var(--b5)" : COLORS[i % COLORS.length]; }
-function nameOf(cat){ if (String(cat).startsWith("proj-")){ const p = projets().find(x=>"proj-"+x.id===cat); return p ? "Projet · "+p.nom : "Projet"; } const e = S.cfg.env.find(e=>e.id===cat); return e ? e.nom : "Autre"; }
+function colorOf(cat){ if (String(cat).startsWith("proj-") || cat==="deja") return "var(--muted)"; const i = S.cfg.env.findIndex(e=>e.id===cat); return i<0 ? "var(--b5)" : COLORS[i % COLORS.length]; }
+function nameOf(cat){ if (cat==="deja") return "Dépensé avant l'appli"; if (String(cat).startsWith("proj-")){ const p = projets().find(x=>"proj-"+x.id===cat); return p ? "Projet · "+p.nom : "Projet"; } const e = S.cfg.env.find(e=>e.id===cat); return e ? e.nom : "Autre"; }
 
 /* ---------- vues ---------- */
 function header(){
   const [y,m] = today().split("-").map(Number);
-  return `<div class="top"><h1>Cap Épargne</h1><span class="m">${MOIS[m-1]} ${y}</span></div>` +
+  return `<div class="top"><h1>Cap Épargne</h1><span class="m">${MOIS[m-1]} ${y}</span></div><div id="sync" class="sync ${sync}">${syncLabel()}</div>` +
     (S.demo ? `<div class="banner"><div><b>Ce sont des chiffres d'exemple.</b> <span class="small">Mets ta vraie paie et tes charges fixes pour démarrer.</span></div><button class="btn" data-action="start">Commencer avec mes chiffres</button></div>` : "");
 }
 
@@ -293,6 +312,8 @@ function viewMois(){
     </section>`;
   }
   const p = plan(num(mois.salaire), num(mois.bonus));
+  const dejaAvant = S.depenses.filter(x=>x.cat==="deja" && monthKey(x.date)===mk).reduce((a,x)=>a+num(x.montant),0);
+  if (dejaAvant){ const tp = p.env.reduce((a,e)=>a+num(e.pct),0) || 1; p.env.forEach(e=>e.alloue = Math.max(0, p.vivre - dejaAvant) * num(e.pct) / tp); }
   const dep = S.depenses.filter(x=>monthKey(x.date)===mk);
   const carteTout = dep.filter(x=>x.carte).reduce((a,x)=>a+num(x.montant),0);
   const depProj = dep.filter(x=>String(x.cat).startsWith("proj-"));
@@ -332,12 +353,12 @@ function viewMois(){
     <div class="ordre">
       <span class="dot" style="background:var(--b100);margin-top:6px"></span>
       <div style="flex:1;display:flex;flex-direction:column;gap:8px">
-        <div><div class="small muted">1. Épargne (${epLabel()}) — à faire en premier</div><b>Vire ${eur(p.epargne + p.provTotal)} sur ton livret</b>${p.provTotal>0 ? `<div class="small muted">${eur(p.epargne)} pour ton objectif + ${eur(p.provTotal)} mis de côté pour ${p.prov.map(x=>esc(x.nom)).join(", ")}</div>` : ""}${num(mois.bonus)>0 ? `<div class="small muted">dont ${eur(num(mois.bonus))} de primes envoyées directement à l'épargne</div>` : ""}</div>
+        <div><div class="small muted">1. Épargne (${mois.epOverride != null ? "ajustée pour ce mois" : epLabel()}) — à faire en premier</div><b>Vire ${eur(p.epargne + p.provTotal)} sur ton livret</b>${p.provTotal>0 ? `<div class="small muted">${eur(p.epargne)} pour ton objectif + ${eur(p.provTotal)} mis de côté pour ${p.prov.map(x=>esc(x.nom)).join(", ")}</div>` : ""}${num(mois.bonus)>0 ? `<div class="small muted">dont ${eur(num(mois.bonus))} de primes envoyées directement à l'épargne</div>` : ""}</div>
         <button class="btn ${mois.vire?"done":""}" data-action="vire">${mois.vire ? "✓ Virement fait" : "C'est fait"}</button>
       </div>
     </div>
 
-    <div class="row"><span class="lbl"><span class="dot" style="background:var(--b500)"></span>2. Charges fixes</span><span class="amt">${eur(p.fixes)}</span></div>
+    <div class="row"><span class="lbl"><span class="dot" style="background:var(--b500)"></span>2. Charges fixes${mois.fixesOverride != null ? " (déjà payées ce mois-ci)" : ""}</span><span class="amt">${eur(p.fixes)}</span></div>
     <div class="small muted" style="margin-top:-6px">${S.cfg.fixes.map(f=>esc(f.nom)).join(" · ") || "Aucune charge renseignée"}</div>
 
     ${p.provTotal>0 ? `<div class="row"><span class="lbl"><span class="dot" style="background:var(--muted)"></span>Projets à venir</span><span class="amt">${eur(p.provTotal)}</span></div>` : ""}
@@ -562,6 +583,7 @@ function viewReglages(){
   </section>
 
   <section class="card">
+    ${mois && mois.envOverride ? `<div class="banner small">Ce mois-ci, une répartition spéciale s'applique (${c.env.map(e=>`${esc(e.nom)} ${num(mois.envOverride[e.id] ?? e.pct)} %`).join(", ")}). Les % ci-dessous s'appliquent à partir du mois prochain.</div>` : ""}
     <div class="row"><div class="eyebrow">Enveloppes (en % du « pour vivre »)</div><span class="small ${totPct===100?"muted":"over"}">Total ${totPct} %</span></div>
     ${c.env.map((e,i)=>`<div class="grid2"><input type="text" id="en-n-${e.id}" data-en="${e.id}" data-k="nom" value="${esc(e.nom)}" aria-label="Nom" style="border-left:5px solid ${COLORS[i%COLORS.length]}"><input type="text" inputmode="decimal" id="en-p-${e.id}" data-en="${e.id}" data-k="pct" value="${e.pct}" aria-label="Pourcentage"><button class="x" data-action="rmen" data-id="${e.id}" aria-label="Retirer">×</button></div>`).join("")}
     ${c.env.length < 6 ? `<button class="btn ghost" data-action="adden">Ajouter une enveloppe</button>` : ""}
@@ -681,6 +703,28 @@ document.addEventListener("keydown", (ev)=>{ if (ev.key==="Escape" && !document.
 
 syncMonth(monthKey(today())); save();
 render();
+
+/* ---------- sauvegarde en ligne (liée au compte Claude) ---------- */
+(async function connectCloud(){
+  if (!window.claude){ setSync("device"); return; }
+  setSync("wait");
+  try {
+    const db = await window.claude?.use?.("db");
+    const user = await window.claude?.use?.("user");
+    const uid = user ? await user.id() : null;
+    if (!db || !uid){ setSync("local"); return; }
+    const ref = db.collection("data/users/" + uid).doc("cap-epargne");
+    const snap = await Promise.race([ref.get(), new Promise((_, rej)=>setTimeout(()=>rej({code:"timeout"}), 10000))]);
+    if (snap.exists){
+      const d = snap.data();
+      try { const st = JSON.parse(d.state); if (st && st.cfg){ S = st; try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} } } catch(e){}
+      cloudRef = ref; setSync("ok");
+      syncMonth(monthKey(today())); render();
+    } else {
+      cloudRef = ref; await cloudSave();
+    }
+  } catch(e){ setSync("err"); }
+})();
 </script>
 
 </body>
